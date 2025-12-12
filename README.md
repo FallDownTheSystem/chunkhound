@@ -37,6 +37,7 @@ Your AI assistant searches code but doesn't understand it. ChunkHound researches
 ## Documentation
 
 **Visit [chunkhound.github.io](https://chunkhound.github.io) for complete guides:**
+
 - [Tutorial](https://chunkhound.github.io/tutorial/)
 - [Configuration Guide](https://chunkhound.github.io/configuration/)
 - [Architecture Deep Dive](https://chunkhound.github.io/under-the-hood/)
@@ -59,6 +60,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv tool install chunkhound
 ```
 
+Or install from source (FallDownTheSystem fork, auto-indexing-config branch):
+
+```bash
+git clone -b auto-indexing-config https://github.com/FallDownTheSystem/chunkhound.git
+cd chunkhound
+uv tool install . --force --reinstall
+```
+
 ## Quick Start
 
 1. Create `.chunkhound.json` in project root
@@ -75,6 +84,7 @@ uv tool install chunkhound
 ```
 > **Note:** Use `"codex-cli"` instead if you prefer Codex. Both work equally well and require no API key.
 2. Index your codebase
+
 ```bash
 chunkhound index
 ```
