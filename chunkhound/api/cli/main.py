@@ -56,6 +56,7 @@ def create_parser() -> argparse.ArgumentParser:
     # Import parsers dynamically to avoid early loading
     from .parsers import create_main_parser, setup_subparsers
     from .parsers.calibrate_parser import add_calibrate_subparser
+    from .parsers.config_parser import add_config_subparser
     from .parsers.mcp_parser import add_mcp_subparser
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
@@ -71,6 +72,7 @@ def create_parser() -> argparse.ArgumentParser:
     add_research_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
+    add_config_subparser(subparsers)
 
     return parser
 
@@ -86,6 +88,21 @@ async def async_main() -> None:
 
     # Setup logging for non-MCP commands (MCP already handled above)
     setup_logging(getattr(args, "verbose", False))
+
+    # Handle config command early - it doesn't need project config validation
+    if args.command == "config":
+        try:
+            from .commands.config_cmd import config_command
+
+            await config_command(args, None)
+            return
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Command failed: {e}")
+            logger.exception("Full error details:")
+            sys.exit(1)
 
     # Validate args and create config
     # Special-case: index subtools (--simulate, --check-ignores) never require embeddings
