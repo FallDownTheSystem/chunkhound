@@ -51,6 +51,7 @@ from chunkhound.version import __version__
 from .base import MCPServerBase
 from .common import handle_tool_call
 from .tools import TOOL_REGISTRY, get_filtered_tools
+from chunkhound.utils.instance_lock import _is_process_running
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -236,6 +237,22 @@ class StdioMCPServer(MCPServerBase):
 
             return tools
 
+    async def _monitor_parent_process(self, parent_pid: int, check_interval: float = 2.0) -> None:
+        """Watchdog: returns when parent process dies.
+
+        On Windows, when the parent (Claude) dies, stdin may not close cleanly.
+        This monitors the parent PID and returns when it's gone, allowing the
+        main event loop to shut down gracefully.
+
+        Args:
+            parent_pid: PID of the parent process to monitor.
+            check_interval: How often to check if parent is alive (seconds).
+        """
+        while _is_process_running(parent_pid):
+            await asyncio.sleep(check_interval)
+        self.debug_log(f"Parent process {parent_pid} died")
+        # Simply return to signal completion (don't raise SystemExit - may be swallowed)
+
     @asynccontextmanager
     async def server_lifespan(self) -> AsyncIterator[dict]:
         """Manage server lifecycle with proper initialization and cleanup."""
@@ -269,6 +286,10 @@ class StdioMCPServer(MCPServerBase):
                     ),
                 )
 
+                # Capture parent PID once at startup for orphan detection
+                parent_pid = os.getppid()
+                self.debug_log(f"Parent process PID: {parent_pid}")
+
                 # Run with lifespan management
                 async with self.server_lifespan():
                     # Run the stdio server
@@ -278,11 +299,32 @@ class StdioMCPServer(MCPServerBase):
                         write_stream,
                     ):
                         self.debug_log("Stdio server started, awaiting requests")
-                        await self.server.run(
-                            read_stream,
-                            write_stream,
-                            init_options,
+
+                        # Create both server and parent monitor tasks
+                        server_task = asyncio.create_task(
+                            self.server.run(read_stream, write_stream, init_options)
                         )
+                        monitor_task = asyncio.create_task(
+                            self._monitor_parent_process(parent_pid)
+                        )
+
+                        # Wait for EITHER server to finish OR parent to die
+                        done, pending = await asyncio.wait(
+                            [server_task, monitor_task],
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        # Cancel whichever task is still running
+                        for task in pending:
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+
+                        # Log which task completed first
+                        if monitor_task in done:
+                            self.debug_log("Shutting down due to parent process death")
             else:
                 # Minimal fallback stdio: immediately emit a valid initialize response
                 # so tests can proceed without the official MCP SDK.

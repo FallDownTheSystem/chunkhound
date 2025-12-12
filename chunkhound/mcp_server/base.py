@@ -12,6 +12,7 @@ to ensure consistent initialization while respecting protocol-specific constrain
 """
 
 import asyncio
+import atexit
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -88,6 +89,10 @@ class MCPServerBase(ABC):
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
 
+        # Register atexit handler to ensure lock cleanup on process exit
+        # This is a safety net for cases where cleanup() isn't called
+        atexit.register(self._atexit_cleanup)
+
     def debug_log(self, message: str) -> None:
         """Log debug message to file if debug mode is enabled."""
         if self.debug_mode:
@@ -105,6 +110,18 @@ class MCPServerBase(ABC):
             except Exception:
                 # Silently fail if we can't write to debug file
                 pass
+
+    def _atexit_cleanup(self) -> None:
+        """Synchronous cleanup called on process exit.
+
+        This is a safety net to ensure the instance lock is released even if
+        the async cleanup() method isn't called (e.g., on unexpected termination).
+        """
+        if self._instance_lock:
+            try:
+                self._instance_lock.release()
+            except Exception:
+                pass  # Best effort cleanup
 
     async def initialize(self) -> None:
         """Initialize services and database connection.
