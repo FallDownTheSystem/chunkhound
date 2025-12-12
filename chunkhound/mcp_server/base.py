@@ -5,6 +5,7 @@ This module provides a base class that handles:
 - Configuration validation
 - Lifecycle management (startup/shutdown)
 - Common error handling patterns
+- Auto-indexing toggle and single-instance enforcement
 
 Architecture Note: MCP server (stdio-only) inherits from this base
 to ensure consistent initialization while respecting protocol-specific constraints.
@@ -19,11 +20,13 @@ from typing import Any
 
 from chunkhound.core.config import EmbeddingProviderFactory
 from chunkhound.core.config.config import Config
+from chunkhound.core.config.global_config import GlobalConfig
 from chunkhound.database_factory import DatabaseServices, create_services
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.services.realtime_indexing_service import RealtimeIndexingService
+from chunkhound.utils.instance_lock import InstanceLock
 
 
 class MCPServerBase(ABC):
@@ -72,6 +75,15 @@ class MCPServerBase(ABC):
             "scan_started_at": None,
             "scan_completed_at": None,
         }
+
+        # Auto-indexing configuration (from global config)
+        # Load global config to check auto_indexing setting
+        self._global_config = GlobalConfig()
+        self._auto_indexing = self._global_config.get_auto_indexing()
+
+        # Instance lock for single-instance enforcement (per-project)
+        # Only used when auto-indexing is enabled
+        self._instance_lock: InstanceLock | None = None
 
         # Set MCP mode to suppress stderr output that interferes with JSON-RPC
         os.environ["CHUNKHOUND_MCP_MODE"] = "1"
@@ -169,12 +181,47 @@ class MCPServerBase(ABC):
                 target_path = self.config.target_dir or db_path.parent.parent
                 self.debug_log(f"Using fallback path resolution: {target_path}")
 
+            # Single-instance enforcement when auto-indexing is enabled
+            if self._auto_indexing:
+                self.debug_log("Auto-indexing enabled, acquiring instance lock")
+                # Determine transport type from args or server type
+                transport = None
+                if self.args and hasattr(self.args, "http") and self.args.http:
+                    transport = "http"
+                else:
+                    transport = "stdio"
+
+                self._instance_lock = InstanceLock(
+                    project_path=target_path,
+                    transport=transport,
+                )
+
+                if not self._instance_lock.acquire():
+                    lock_info = self._instance_lock.get_lock_info()
+                    pid = lock_info.get("pid", "unknown") if lock_info else "unknown"
+                    raise RuntimeError(
+                        f"Another ChunkHound MCP server is already running for "
+                        f"{target_path} (PID {pid}). "
+                        f"Only one instance with auto-indexing enabled is allowed per project. "
+                        f"Disable auto-indexing with 'chunkhound config set auto_indexing false' "
+                        f"to run multiple instances."
+                    )
+                self.debug_log(f"Instance lock acquired: {self._instance_lock.lock_path}")
+            else:
+                self.debug_log(
+                    "Auto-indexing disabled, skipping instance lock (multi-instance allowed)"
+                )
+
             # Mark as initialized immediately (tools available)
             self._initialized = True
             self.debug_log("Service initialization complete")
 
             # Defer DB connect + realtime start to background so initialize is fast
-            asyncio.create_task(self._deferred_connect_and_start(target_path))
+            # Only start realtime indexing when auto-indexing is enabled
+            if self._auto_indexing:
+                asyncio.create_task(self._deferred_connect_and_start(target_path))
+            else:
+                asyncio.create_task(self._deferred_connect_only(target_path))
 
     async def _deferred_connect_and_start(self, target_path: Path) -> None:
         """Connect DB and start realtime monitoring in background."""
@@ -200,6 +247,29 @@ class MCPServerBase(ABC):
             )
         except Exception as e:
             self.debug_log(f"Deferred connect/start failed: {e}")
+
+    async def _deferred_connect_only(self, target_path: Path) -> None:
+        """Connect DB without starting realtime monitoring.
+
+        Used when auto-indexing is disabled. Only establishes the database
+        connection for search operations, without starting filesystem
+        monitoring or background indexing.
+
+        Args:
+            target_path: Target directory (unused but kept for consistency)
+        """
+        try:
+            # Ensure services exist
+            if not self.services:
+                return
+            # Connect to database lazily
+            if not self.services.provider.is_connected:
+                self.services.provider.connect()
+            self.debug_log(
+                "Database connected (auto-indexing disabled, no realtime monitoring)"
+            )
+        except Exception as e:
+            self.debug_log(f"Deferred connect failed: {e}")
 
     async def _coordinated_initial_scan(
         self, target_path: Path, monitoring_task: asyncio.Task
@@ -297,6 +367,12 @@ class MCPServerBase(ABC):
             else:
                 self.services.provider.disconnect()
             self._initialized = False
+
+        # Release instance lock if acquired
+        if self._instance_lock:
+            self.debug_log("Releasing instance lock")
+            self._instance_lock.release()
+            self._instance_lock = None
 
     def ensure_services(self) -> DatabaseServices:
         """Ensure services are initialized and return them.
