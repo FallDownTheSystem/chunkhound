@@ -94,8 +94,10 @@ class ClaudeCodeCLIProvider(LLMProvider):
             RuntimeError: If CLI command fails
         """
         # Build CLI command
+        # Allow binary override via env var (required on Windows where .cmd extension matters)
+        binary = os.getenv("CHUNKHOUND_CLAUDE_BIN", "claude")
         model_arg = self._map_model_to_cli_arg(self._model)
-        cmd = ["claude", "--print", "--model", model_arg, "--output-format", "text"]
+        cmd = [binary, "--print", "--model", model_arg, "--output-format", "text"]
 
         # Disable all tools for vanilla LLM behavior (no workspace context needed)
         cmd.extend([
@@ -121,8 +123,9 @@ class ClaudeCodeCLIProvider(LLMProvider):
         if system:
             cmd.extend(["--append-system-prompt", system])
 
-        # Add the user prompt (-- separator must come after all flags)
-        cmd.extend(["--", prompt])
+        # Use stdin for prompt to avoid Windows command line length limits (~32KB)
+        # The -p flag tells claude to read prompt from stdin
+        cmd.append("-p")
 
         # Set environment for subscription-based auth
         env = os.environ.copy()
@@ -142,16 +145,16 @@ class ClaudeCodeCLIProvider(LLMProvider):
                 # Create subprocess with neutral CWD to prevent workspace scanning
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdin=subprocess.DEVNULL,  # Prevent stdin inheritance
+                    stdin=asyncio.subprocess.PIPE,  # Use stdin for prompt
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=env,
                     cwd=tempfile.gettempdir(),  # Cross-platform temp directory
                 )
 
-                # Wrap communicate() with timeout (this is the long-running part)
+                # Send prompt via stdin and wait for completion
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                    process.communicate(input=prompt.encode("utf-8")),
                     timeout=request_timeout,
                 )
 
