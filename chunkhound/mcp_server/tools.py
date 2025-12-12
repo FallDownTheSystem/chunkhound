@@ -164,7 +164,7 @@ def _generate_json_schema_from_signature(func: Callable) -> dict[str, Any]:
 
     for param_name, param in sig.parameters.items():
         # Skip service/infrastructure parameters that aren't part of the tool API
-        if param_name in ('services', 'embedding_manager', 'llm_manager', 'scan_progress', 'progress'):
+        if param_name in ('services', 'embedding_manager', 'llm_manager', 'scan_progress', 'progress', 'config', 'target_path'):
             continue
 
         # Get type hint

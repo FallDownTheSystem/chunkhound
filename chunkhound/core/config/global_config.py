@@ -62,13 +62,18 @@ class GlobalConfig:
         """Resolve the global config file path using XDG Base Directory spec.
 
         Resolution order:
-        1. $XDG_CONFIG_HOME/chunkhound/config.json (if XDG_CONFIG_HOME is set)
-        2. ~/.config/chunkhound/config.json (XDG default on Linux/macOS)
-        3. ~/.chunkhound/config.json (fallback for Windows or legacy)
+        1. $CHUNKHOUND_GLOBAL_CONFIG_PATH (if set - for testing and overrides)
+        2. $XDG_CONFIG_HOME/chunkhound/config.json (if XDG_CONFIG_HOME is set)
+        3. ~/.config/chunkhound/config.json (XDG default on Linux/macOS)
+        4. ~/.chunkhound/config.json (fallback for Windows or legacy)
 
         Returns:
                 Path to the global configuration file.
         """
+        # Check explicit override (for testing and custom deployments)
+        if global_config_path := os.getenv("CHUNKHOUND_GLOBAL_CONFIG_PATH"):
+            return Path(global_config_path)
+
         # Check XDG_CONFIG_HOME environment variable
         if xdg_config := os.getenv("XDG_CONFIG_HOME"):
             return Path(xdg_config) / "chunkhound" / "config.json"

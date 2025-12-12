@@ -410,6 +410,299 @@ class TestTypeAnnotations:
             )
 
 
+class TestAutoIndexingSmoke:
+    """Test auto-indexing configuration and single-instance enforcement."""
+
+    def test_global_config_imports(self):
+        """Test that global config module can be imported."""
+        from chunkhound.core.config.global_config import GlobalConfig
+        assert GlobalConfig is not None
+
+    def test_global_config_default_auto_indexing(self):
+        """Test that auto_indexing defaults to True."""
+        from chunkhound.core.config.global_config import GlobalConfig
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Use temp dir to isolate from user's global config
+            config_path = Path(temp_dir) / "config.json"
+            gc = GlobalConfig(config_path=config_path)
+            # Default should be True (backward compatible)
+            assert gc.get_auto_indexing() is True
+
+    def test_instance_lock_imports(self):
+        """Test that instance lock module can be imported."""
+        from chunkhound.utils.instance_lock import InstanceLock
+        assert InstanceLock is not None
+
+    def test_instance_lock_basic_acquire_release(self):
+        """Test basic lock acquisition and release."""
+        from chunkhound.utils.instance_lock import InstanceLock
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_path = Path(temp_dir) / "test_project"
+            project_path.mkdir()
+
+            lock = InstanceLock(project_path, transport="stdio")
+
+            # Should be able to acquire
+            assert lock.acquire() is True
+
+            # Should be able to release
+            lock.release()
+
+    def test_config_cli_help(self):
+        """Test that chunkhound config --help works."""
+        result = subprocess.run(
+            ["uv", "run", "chunkhound", "config", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0
+        assert "config" in result.stdout.lower() or "config" in result.stderr.lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_server_with_auto_indexing_disabled(self):
+        """Test MCP server starts correctly with auto-indexing disabled."""
+        from chunkhound.core.config.global_config import GlobalConfig
+        import json
+
+        with windows_safe_tempdir() as temp_path:
+            # Create global config with auto_indexing=false
+            global_config_path = temp_path / ".chunkhound_global_test" / "config.json"
+            global_config_path.parent.mkdir(parents=True, exist_ok=True)
+            global_config_path.write_text(json.dumps({"auto_indexing": False}))
+
+            # Create project config
+            config_path = temp_path / ".chunkhound.json"
+            db_path = temp_path / ".chunkhound" / "test.db"
+            db_path.parent.mkdir(exist_ok=True)
+
+            config = {
+                "database": {"path": str(db_path), "provider": "duckdb"},
+                "indexing": {"include": ["*.py"]}
+            }
+            config_path.write_text(json.dumps(config))
+
+            # Create test file
+            test_file = temp_path / "test.py"
+            test_file.write_text("def hello(): return 'world'")
+
+            # Start MCP server with custom global config
+            mcp_env = get_safe_subprocess_env(os.environ)
+            mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+            # Point to our test global config
+            mcp_env["CHUNKHOUND_GLOBAL_CONFIG_PATH"] = str(global_config_path)
+
+            proc = await create_subprocess_exec_safe(
+                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                cwd=str(temp_path),
+                env=mcp_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            client = SubprocessJsonRpcClient(proc)
+            await client.start()
+
+            try:
+                # Send initialize request
+                init_result = await client.send_request(
+                    "initialize",
+                    {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1.0"}
+                    },
+                    timeout=10.0
+                )
+
+                assert "serverInfo" in init_result
+
+                # Send initialized notification
+                await client.send_notification("notifications/initialized")
+
+                # Request tool list - should include 'index' tool when auto-indexing disabled
+                tools_result = await client.send_request("tools/list", timeout=5.0)
+                tools = tools_result.get("tools", [])
+                tool_names = [t["name"] for t in tools]
+
+                # When auto-indexing is disabled, 'index' tool should be available
+                assert "index" in tool_names, f"'index' tool not found when auto-indexing disabled: {tool_names}"
+                # Basic tools should still be available
+                assert "search_regex" in tool_names
+                assert "get_stats" in tool_names
+
+            except asyncio.TimeoutError:
+                pytest.fail("MCP server with auto-indexing disabled timed out")
+            finally:
+                await client.close()
+
+    @pytest.mark.asyncio
+    async def test_mcp_server_with_auto_indexing_enabled_no_index_tool(self):
+        """Test MCP server doesn't expose index tool when auto-indexing is enabled."""
+        from chunkhound.core.config.global_config import GlobalConfig
+        import json
+
+        with windows_safe_tempdir() as temp_path:
+            # Create global config with auto_indexing=true (default)
+            global_config_path = temp_path / ".chunkhound_global_test" / "config.json"
+            global_config_path.parent.mkdir(parents=True, exist_ok=True)
+            global_config_path.write_text(json.dumps({"auto_indexing": True}))
+
+            # Create project config
+            config_path = temp_path / ".chunkhound.json"
+            db_path = temp_path / ".chunkhound" / "test.db"
+            db_path.parent.mkdir(exist_ok=True)
+
+            config = {
+                "database": {"path": str(db_path), "provider": "duckdb"},
+                "indexing": {"include": ["*.py"]}
+            }
+            config_path.write_text(json.dumps(config))
+
+            # Create test file
+            test_file = temp_path / "test.py"
+            test_file.write_text("def hello(): return 'world'")
+
+            # Start MCP server
+            mcp_env = get_safe_subprocess_env(os.environ)
+            mcp_env["CHUNKHOUND_MCP_MODE"] = "1"
+            mcp_env["CHUNKHOUND_GLOBAL_CONFIG_PATH"] = str(global_config_path)
+
+            proc = await create_subprocess_exec_safe(
+                "uv", "run", "chunkhound", "mcp", str(temp_path),
+                cwd=str(temp_path),
+                env=mcp_env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            client = SubprocessJsonRpcClient(proc)
+            await client.start()
+
+            try:
+                # Send initialize request
+                init_result = await client.send_request(
+                    "initialize",
+                    {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1.0"}
+                    },
+                    timeout=10.0
+                )
+
+                assert "serverInfo" in init_result
+
+                # Send initialized notification
+                await client.send_notification("notifications/initialized")
+
+                # Request tool list - should NOT include 'index' tool when auto-indexing enabled
+                tools_result = await client.send_request("tools/list", timeout=5.0)
+                tools = tools_result.get("tools", [])
+                tool_names = [t["name"] for t in tools]
+
+                # When auto-indexing is enabled, 'index' tool should NOT be available
+                assert "index" not in tool_names, f"'index' tool should not be available when auto-indexing enabled: {tool_names}"
+                # Basic tools should still be available
+                assert "search_regex" in tool_names
+                assert "get_stats" in tool_names
+
+            except asyncio.TimeoutError:
+                pytest.fail("MCP server with auto-indexing enabled timed out")
+            finally:
+                await client.close()
+
+
+class TestSingleInstanceEnforcement:
+    """Test single-instance enforcement for MCP servers with auto-indexing enabled."""
+
+    def test_second_instance_fails_with_auto_indexing_enabled(self):
+        """Test that a second MCP server fails when auto-indexing is enabled."""
+        from chunkhound.utils.instance_lock import InstanceLock
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_path = Path(temp_dir) / "test_project"
+            project_path.mkdir()
+
+            # First instance acquires the lock
+            lock1 = InstanceLock(project_path, transport="stdio")
+            assert lock1.acquire() is True
+
+            try:
+                # Second instance should fail to acquire
+                lock2 = InstanceLock(project_path, transport="http")
+                assert lock2.acquire() is False
+
+                # Verify lock info shows first instance
+                lock_info = lock2.get_lock_info()
+                assert lock_info is not None
+                assert lock_info["transport"] == "stdio"
+
+            finally:
+                # Clean up
+                lock1.release()
+
+    def test_multiple_instances_allowed_for_different_projects(self):
+        """Test that multiple projects can run simultaneously."""
+        from chunkhound.utils.instance_lock import InstanceLock
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project1 = Path(temp_dir) / "project1"
+            project2 = Path(temp_dir) / "project2"
+            project1.mkdir()
+            project2.mkdir()
+
+            # Both should be able to acquire locks
+            lock1 = InstanceLock(project1, transport="stdio")
+            lock2 = InstanceLock(project2, transport="stdio")
+
+            assert lock1.acquire() is True
+            try:
+                assert lock2.acquire() is True
+                try:
+                    # Verify both are held
+                    assert lock1.get_lock_info() is not None
+                    assert lock2.get_lock_info() is not None
+                finally:
+                    lock2.release()
+            finally:
+                lock1.release()
+
+    def test_stale_lock_detection(self):
+        """Test that stale locks (dead processes) are properly detected."""
+        from chunkhound.utils.instance_lock import InstanceLock
+        import tempfile
+        import json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_path = Path(temp_dir) / "test_project"
+            project_path.mkdir()
+
+            lock = InstanceLock(project_path, transport="stdio")
+
+            # Create a fake lock file with a non-existent PID
+            lock_file = lock._lock_path  # Access the internal lock path
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_file.write_text(json.dumps({
+                "pid": 999999999,  # Non-existent PID
+                "start_time": "2025-01-01T00:00:00",
+                "project_path": str(project_path),
+                "transport": "stdio"
+            }))
+
+            # Should detect stale lock and acquire
+            assert lock.acquire() is True
+            lock.release()
+
+
 class TestConfigurationSmoke:
     """Test that new configuration parameters don't break imports or config."""
 
