@@ -146,6 +146,8 @@ class TestServerStartup:
             config_path.write_text(json.dumps(config))
             
             # Test that the server starts without crashing
+            # Use forward slashes to avoid Windows backslash escape issues in f-string
+            cwd_safe = os.getcwd().replace("\\", "/")
             proc = await create_subprocess_exec_safe(
                 "uv",
                 "run",
@@ -153,7 +155,7 @@ class TestServerStartup:
                 f'''
 import sys
 import os
-sys.path.insert(0, "{os.getcwd()}")
+sys.path.insert(0, "{cwd_safe}")
 from chunkhound.mcp_server.stdio import main
 import asyncio
 

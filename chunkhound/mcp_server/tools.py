@@ -22,6 +22,7 @@ from chunkhound.database_factory import DatabaseServices
 from chunkhound.embeddings import EmbeddingManager
 from chunkhound.llm_manager import LLMManager
 from chunkhound.services.deep_research_service import DeepResearchService
+from chunkhound.services.directory_indexing_service import DirectoryIndexingService
 from chunkhound.version import __version__
 
 # Response size limits (tokens)
@@ -626,6 +627,132 @@ async def deep_research_impl(
     return result
 
 
+@register_tool(
+    description="Manually trigger directory indexing when auto-indexing is disabled. "
+    "Use this to update the search database with new or modified files. "
+    "Only available when auto-indexing is disabled.",
+    requires_embeddings=False,
+    name="index",
+)
+async def index_impl(
+    services: DatabaseServices,
+    embedding_manager: EmbeddingManager | None,
+    config: Any = None,
+    target_path: Any = None,
+    path: str | None = None,
+    force_reindex: bool = False,
+    no_embeddings: bool = False,
+) -> dict[str, Any]:
+    """Manual indexing tool for when auto-indexing is disabled.
+
+    Args:
+        services: Database services bundle
+        embedding_manager: Embedding manager instance (optional)
+        config: Config object (injected by server)
+        target_path: Target path (injected by server)
+        path: Optional relative path to limit indexing scope
+        force_reindex: Re-index all files (ignore cache)
+        no_embeddings: Skip embedding generation
+
+    Returns:
+        Dict with indexing statistics
+    """
+    from pathlib import Path
+
+    # Determine the directory to index
+    if target_path:
+        base_path = Path(target_path)
+    else:
+        base_path = Path(".")
+
+    # If a relative path is specified, join it with the base
+    if path:
+        index_path = base_path / path
+    else:
+        index_path = base_path
+
+    if not index_path.exists():
+        return {
+            "error": f"Path does not exist: {index_path}",
+            "success": False,
+        }
+
+    if not index_path.is_dir():
+        return {
+            "error": f"Path is not a directory: {index_path}",
+            "success": False,
+        }
+
+    # Create indexing service
+    indexing_service = DirectoryIndexingService(
+        indexing_coordinator=services.indexing_coordinator,
+        config=config,
+        progress_callback=None,  # No progress for MCP mode
+    )
+
+    try:
+        # Perform indexing
+        stats = await indexing_service.process_directory(
+            index_path,
+            no_embeddings=no_embeddings or not embedding_manager,
+        )
+
+        # Return stats as a dictionary
+        return {
+            "success": True,
+            "files_processed": stats.files_processed,
+            "files_skipped": stats.files_skipped,
+            "chunks_created": stats.chunks_created,
+            "embeddings_generated": stats.embeddings_generated,
+            "processing_time": stats.processing_time,
+            "cleanup_deleted_files": stats.cleanup_deleted_files,
+            "cleanup_deleted_chunks": stats.cleanup_deleted_chunks,
+            "path": str(index_path),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "path": str(index_path),
+        }
+
+
+# =============================================================================
+# Tool Filtering
+# =============================================================================
+
+
+def get_filtered_tools(
+    auto_indexing: bool,
+    embedding_manager: Any = None,
+) -> dict[str, Tool]:
+    """Get tools filtered based on auto-indexing setting and embedding availability.
+
+    Args:
+        auto_indexing: Whether auto-indexing is enabled
+        embedding_manager: Optional embedding manager to check for provider availability
+
+    Returns:
+        Dict of tool name to Tool, filtered appropriately
+    """
+    filtered: dict[str, Tool] = {}
+
+    for tool_name, tool in TOOL_REGISTRY.items():
+        # Skip index tool when auto-indexing is enabled
+        # (auto-indexing handles indexing automatically)
+        if tool_name == "index" and auto_indexing:
+            continue
+
+        # Skip embedding-dependent tools if no providers available
+        if tool.requires_embeddings:
+            if not embedding_manager or not embedding_manager.list_providers():
+                continue
+
+        filtered[tool_name] = tool
+
+    return filtered
+
+
 # =============================================================================
 # Tool Execution
 # =============================================================================
@@ -638,6 +765,8 @@ async def execute_tool(
     arguments: dict[str, Any],
     scan_progress: dict | None = None,
     llm_manager: Any = None,
+    config: Any = None,
+    target_path: Any = None,
 ) -> dict[str, Any]:
     """Execute a tool from the registry with proper argument handling.
 
@@ -648,6 +777,8 @@ async def execute_tool(
         arguments: Tool arguments from the request
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLMManager instance for code_research
+        config: Optional Config instance for index tool
+        target_path: Optional target path for index tool
 
     Returns:
         Tool execution result
@@ -675,6 +806,10 @@ async def execute_tool(
             kwargs["llm_manager"] = llm_manager
         elif param_name == "scan_progress":
             kwargs["scan_progress"] = scan_progress
+        elif param_name == "config":
+            kwargs["config"] = config
+        elif param_name == "target_path":
+            kwargs["target_path"] = target_path
         elif param_name == "progress":
             # Progress parameter for terminal UI (None for MCP mode)
             kwargs["progress"] = None

@@ -135,6 +135,8 @@ async def handle_tool_call(
     debug_mode: bool = False,
     scan_progress: dict | None = None,
     llm_manager: LLMManager | None = None,
+    config: Any = None,
+    target_path: Any = None,
 ) -> list[types.TextContent]:
     """Unified tool call handler for all MCP servers.
 
@@ -150,6 +152,8 @@ async def handle_tool_call(
         debug_mode: Whether to include stack traces in error responses
         scan_progress: Optional scan progress from MCPServerBase
         llm_manager: Optional LLM manager for code_research
+        config: Optional Config instance for index tool
+        target_path: Optional target path for index tool
 
     Returns:
         List containing a single TextContent with JSON-formatted response
@@ -184,6 +188,8 @@ async def handle_tool_call(
             arguments=parsed_args,
             scan_progress=scan_progress,
             llm_manager=llm_manager,
+            config=config,
+            target_path=target_path,
         )
 
         # Format response based on result type

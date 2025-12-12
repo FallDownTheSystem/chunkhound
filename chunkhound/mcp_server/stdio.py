@@ -50,7 +50,7 @@ from chunkhound.version import __version__
 
 from .base import MCPServerBase
 from .common import handle_tool_call
-from .tools import TOOL_REGISTRY
+from .tools import TOOL_REGISTRY, get_filtered_tools
 
 # CRITICAL: Disable ALL logging to prevent JSON-RPC corruption
 logging.disable(logging.CRITICAL)
@@ -180,6 +180,11 @@ class StdioMCPServer(MCPServerBase):
             tool_name: str, arguments: dict[str, Any]
         ) -> list[types.TextContent]:
             """Universal tool handler that routes to the unified handler."""
+            # Determine target_path from args for index tool
+            target_path = None
+            if self.args and hasattr(self.args, "path"):
+                target_path = self.args.path
+
             return await handle_tool_call(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -189,6 +194,8 @@ class StdioMCPServer(MCPServerBase):
                 debug_mode=self.debug_mode,
                 scan_progress=self._scan_progress,
                 llm_manager=self.llm_manager,
+                config=self.config,
+                target_path=target_path,
             )
 
         self._register_list_tools()
@@ -211,15 +218,14 @@ class StdioMCPServer(MCPServerBase):
                 # Return basic tools even if not fully initialized
                 pass
 
-            tools = []
-            for tool_name, tool in TOOL_REGISTRY.items():
-                # Skip embedding-dependent tools if no providers available
-                if tool.requires_embeddings and (
-                    not self.embedding_manager
-                    or not self.embedding_manager.list_providers()
-                ):
-                    continue
+            # Get tools filtered by auto-indexing setting and embedding availability
+            filtered_tools = get_filtered_tools(
+                auto_indexing=self._auto_indexing,
+                embedding_manager=self.embedding_manager,
+            )
 
+            tools = []
+            for tool_name, tool in filtered_tools.items():
                 tools.append(
                     types.Tool(
                         name=tool_name,
