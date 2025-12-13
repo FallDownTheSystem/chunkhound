@@ -628,9 +628,7 @@ async def deep_research_impl(
 
 
 @register_tool(
-    description="Manually trigger directory indexing when auto-indexing is disabled. "
-    "Use this to update the search database with new or modified files. "
-    "Only available when auto-indexing is disabled.",
+    description="Manually trigger indexing. Use this to index the codebase or to update an existing index.",
     requires_embeddings=False,
     name="index",
 )
