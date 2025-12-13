@@ -80,7 +80,16 @@ class DatabaseConfig(BaseModel):
         # Skip directory creation for in-memory databases (":memory:" is invalid on Windows)
         is_memory = str(self.path) == ":memory:"
         if not is_memory:
-            self.path.mkdir(parents=True, exist_ok=True)
+            # Handle backward compatibility: if self.path exists as a file (old DB format),
+            # don't try to mkdir() - the file IS the database
+            if self.path.exists() and self.path.is_file():
+                # Old format: self.path is the database file itself
+                # Return it directly for DuckDB, skip the chunks.db suffix
+                if self.provider == "duckdb":
+                    return self.path
+                # For LanceDB, this shouldn't happen, but handle gracefully
+            else:
+                self.path.mkdir(parents=True, exist_ok=True)
 
         if self.provider == "duckdb":
             return self.path if is_memory else self.path / "chunks.db"

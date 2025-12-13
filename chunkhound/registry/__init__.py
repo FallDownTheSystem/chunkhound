@@ -268,12 +268,15 @@ class ProviderRegistry:
         """Create and register the database provider based on configuration."""
         if not self._config:
             # Default to DuckDB if no config
+            # Use consistent path structure: .chunkhound/db/chunks.db
             from pathlib import Path
 
             from chunkhound.providers.database.duckdb_provider import DuckDBProvider
 
+            default_db_dir = Path.cwd() / ".chunkhound" / "db"
+            default_db_dir.mkdir(parents=True, exist_ok=True)
             provider = DuckDBProvider(
-                db_path=".chunkhound/db", base_directory=Path.cwd()
+                db_path=str(default_db_dir / "chunks.db"), base_directory=Path.cwd()
             )
             provider.connect()
             self.register_provider("database", provider, singleton=True)
