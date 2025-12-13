@@ -61,6 +61,7 @@ def create_parser() -> argparse.ArgumentParser:
     from .parsers.research_parser import add_research_subparser
     from .parsers.run_parser import add_run_subparser
     from .parsers.search_parser import add_search_subparser
+    from .parsers.status_parser import add_status_subparser
 
     parser = create_main_parser()
     subparsers = setup_subparsers(parser)
@@ -70,6 +71,7 @@ def create_parser() -> argparse.ArgumentParser:
     add_mcp_subparser(subparsers)
     add_search_subparser(subparsers)
     add_research_subparser(subparsers)
+    add_status_subparser(subparsers)
     # Diagnose command retired; functionality lives under: index --check-ignores
     add_calibrate_subparser(subparsers)
     add_config_subparser(subparsers)
@@ -109,6 +111,9 @@ async def async_main() -> None:
     if args.command == "index" and (
         getattr(args, "simulate", False) or getattr(args, "check_ignores", False)
     ):
+        setattr(args, "no_embeddings", True)
+    # Status command doesn't require embeddings
+    if args.command == "status":
         setattr(args, "no_embeddings", True)
     config, validation_errors = create_validated_config(args, args.command)
 
@@ -177,6 +182,11 @@ async def async_main() -> None:
             from .commands.calibrate import calibrate_command
 
             await calibrate_command(args, config)
+        elif args.command == "status":
+            # Dynamic import to avoid early chunkhound module loading
+            from .commands.status import status_command
+
+            await status_command(args, config)
         # 'diagnose' command retired; use: chunkhound index --check-ignores --vs git
         else:
             logger.error(f"Unknown command: {args.command}")
