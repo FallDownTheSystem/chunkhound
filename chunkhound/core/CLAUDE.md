@@ -74,10 +74,11 @@ class Embedding:
 
 ### Hierarchy and Precedence
 1. CLI arguments (highest)
-2. Environment variables
-3. Local .chunkhound.json
-4. Config file via --config
-5. Default values (lowest)
+2. Local .chunkhound.json in target directory
+3. Config file via --config
+4. User home config (~/.chunkhound/.chunkhound.json)
+5. Environment variables
+6. Default values (lowest)
 
 ### Environment Variable Pattern
 ```bash
@@ -152,10 +153,12 @@ with pytest.raises(TypeError):
 
 ### Config Precedence Tests
 ```python
-# PATTERN: Test each precedence level
-os.environ["CHUNKHOUND_DATABASE__PATH"] = "env.db"
-config = Config(database={"path": "config.db"})
-assert config.database.path == "env.db"  # Env wins
+# PATTERN: Test each precedence level (later merge = higher priority)
+# Priority: CLI > local config > --config file > home config > env vars > defaults
+# Example: env vars override defaults, but --config file overrides env vars
+os.environ["CHUNKHOUND_DATABASE__PROVIDER"] = "lancedb"
+config = Config()  # No explicit overrides
+assert config.database.provider == "lancedb"  # Env var applied
 ```
 
 ### Model Serialization Tests

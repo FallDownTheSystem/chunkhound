@@ -4,8 +4,9 @@ This module provides a unified configuration system with clear precedence:
 1. CLI arguments (highest priority)
 2. Local .chunkhound.json in target directory (if present)
 3. Config file (via --config path)
-4. Environment variables
-5. Default values (lowest priority)
+4. User home config (~/.chunkhound/.chunkhound.json)
+5. Environment variables
+6. Default values (lowest priority)
 """
 
 import os
@@ -43,9 +44,11 @@ class Config(BaseModel):
 
         Automatically applies correct precedence order:
         1. CLI arguments (highest priority)
-        2. Environment variables
-        3. Config file (via --config path, env var, or local .chunkhound.json)
-        4. Default values (lowest priority)
+        2. Local .chunkhound.json in target directory
+        3. Config file (via --config path or CHUNKHOUND_CONFIG_FILE env var)
+        4. User home config (~/.chunkhound/.chunkhound.json)
+        5. Environment variables
+        6. Default values (lowest priority)
 
         Args:
             args: Optional argparse.Namespace from command line parsing
@@ -86,7 +89,17 @@ class Config(BaseModel):
                 getattr(args, "path", None) if args else None
             )
 
-        # 2. Load config file if found
+        # 2. Load environment variables (lowest priority of explicit sources)
+        env_vars = self._load_env_vars()
+        self._deep_merge(config_data, env_vars)
+
+        # 3. Load user home config (~/.chunkhound/.chunkhound.json)
+        # Cross-platform: Windows (C:\Users\<user>), Linux/macOS (~/)
+        home_config = self._load_home_config()
+        if home_config:
+            self._deep_merge(config_data, home_config)
+
+        # 4. Load config file if found (--config or CHUNKHOUND_CONFIG_FILE)
         if config_file and config_file.exists():
             import json
 
@@ -109,7 +122,7 @@ class Config(BaseModel):
                     "Please check the file format and try again."
                 )
 
-        # 3. Check for local .chunkhound.json in target directory
+        # 5. Check for local .chunkhound.json in target directory
         if target_dir and target_dir.exists():
             local_config_path = target_dir / ".chunkhound.json"
             if local_config_path.exists() and local_config_path != config_file:
@@ -134,11 +147,7 @@ class Config(BaseModel):
                         "Please check the file format and try again."
                     )
 
-        # 4. Load environment variables (override config files)
-        env_vars = self._load_env_vars()
-        self._deep_merge(config_data, env_vars)
-
-        # 5. Apply CLI arguments (highest precedence)
+        # 6. Apply CLI arguments (highest precedence)
         if args:
             cli_overrides = self._extract_cli_overrides(args)
             # If CLI provided an explicit exclude list, mark it as user-supplied
@@ -151,7 +160,7 @@ class Config(BaseModel):
                 pass
             self._deep_merge(config_data, cli_overrides)
 
-        # 6. Apply any direct kwargs (for testing)
+        # 7. Apply any direct kwargs (for testing)
         if kwargs:
             # If direct kwargs include an explicit exclude list, mark it as user-supplied
             try:
@@ -252,6 +261,58 @@ class Config(BaseModel):
                 self._deep_merge(base[key], value)
             else:
                 base[key] = value
+
+    def _load_home_config(self) -> dict[str, Any] | None:
+        """Load configuration from user's home directory.
+
+        Searches for ~/.chunkhound/.chunkhound.json on all platforms.
+        Uses Path.home() which works on Windows (C:\\Users\\<user>)
+        and Unix-like systems (/home/<user> or /Users/<user>).
+
+        Returns:
+            Configuration dictionary if found, None otherwise.
+        """
+        import json
+
+        home_config_dir = Path.home() / ".chunkhound"
+        home_config_path = home_config_dir / ".chunkhound.json"
+
+        if not home_config_path.exists():
+            return None
+
+        try:
+            with open(home_config_path, encoding="utf-8") as f:
+                config = json.load(f)
+                # Mark exclude list as user-supplied when present
+                try:
+                    idx = config.get("indexing") or {}
+                    exc = idx.get("exclude") if isinstance(idx, dict) else None
+                    if isinstance(exc, list):
+                        idx["exclude_user_supplied"] = True
+                        config["indexing"] = idx
+                except Exception:
+                    pass
+                return config
+        except json.JSONDecodeError as e:
+            # Skip stderr output in MCP mode to avoid JSON-RPC interference
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                import sys
+
+                print(
+                    f"Warning: Invalid JSON in home config {home_config_path}: {e}",
+                    file=sys.stderr,
+                )
+            return None
+        except OSError as e:
+            # Handle permission errors, etc.
+            if not os.environ.get("CHUNKHOUND_MCP_MODE"):
+                import sys
+
+                print(
+                    f"Warning: Could not read home config {home_config_path}: {e}",
+                    file=sys.stderr,
+                )
+            return None
 
     @model_validator(mode="after")
     def validate_config(self) -> "Config":
